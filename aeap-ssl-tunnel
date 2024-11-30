@@ -1,0 +1,93 @@
+#!/usr/bin/python3.11 -u
+
+# aeap-ssl-tunnel - A SSL Tunnel for the Asterisk External Application Protocol (AEAP)
+#
+# This script is designed to run on the same server as your Asterisk application and 
+# uses port 9099. It accepts an AEAP connection from Asterisk, reads the ssl_url from 
+# the AEAP params, and connects to that SSL encrypted websocket server.
+#
+#
+# Copyright (C) 2024	Michael Cargile <mikec@vicidial.com>	LICENSE: AGPLv2
+#
+#
+# CHANGES
+# 240610-1425 - Initial Build
+# 241129-2252 - Code Cleanup
+#
+
+import asyncio
+import websockets
+import ssl
+import logging
+import json
+
+logger = logging.getLogger('websockets')
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler())
+
+async def client2server( client_ws, server_ws ):
+	try:
+		async for client_data in client_ws:
+			await server_ws.send(client_data)
+	except websockets.ConnectionClosed:
+		print('connection ended')
+
+
+async def server2client( client_ws, server_ws ):
+	try:
+		async for server_data in server_ws:
+			await client_ws.send(server_data)
+	except websockets.ConnectionClosed:
+		print('connection ended')
+
+
+async def handle_client(client_ws, path):
+	initial_msg = ''
+	server_url = ''
+
+	# intercept the initial setup request and get the ssl_url from the params
+	async for message in client_ws:
+		if isinstance(message, str):
+			initial_msg = message
+
+			msg=json.loads(message)
+			print(msg)
+
+			if 'request' in msg:
+				if msg['request'] == 'setup':
+					params = msg['params']
+					server_url = params['ssl_url']
+
+					print( 'ssl_url = ' + server_url )
+				else:
+					print( 'ERROR: Initial message: ' + message + ' does not include the \'setup\' request')
+			else:
+				print('ERROR: Initial message is binary')
+
+
+		break
+
+
+	# Connect to the SSL-encrypted server
+	print( 'Connecting to ' + server_url )
+	async with websockets.connect(server_url, ssl=True) as server_ws:
+
+		# forward the initial setup request
+		await server_ws.send(initial_msg)
+
+		client_task = asyncio.create_task(client2server( client_ws, server_ws ))
+		server_task = asyncio.create_task(server2client( client_ws, server_ws ))
+		done, pending = await asyncio.wait(
+			[client_task, server_task],
+			return_when=asyncio.FIRST_COMPLETED,
+		)
+		for task in pending:
+			task.cancel()
+		 
+
+
+async def main():
+	server = await websockets.serve(handle_client, "127.0.0.1", 9099)
+	await server.wait_closed()
+
+asyncio.run(main())
